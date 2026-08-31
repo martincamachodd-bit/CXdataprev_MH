@@ -1,0 +1,165 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  campo
+  qualidade
+  aprovador
+}
+
+model User {
+  id           String   @id @default(cuid())
+  nome         String
+  email        String   @unique
+  passwordHash String
+  role         Role
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  executedSteps    AssetStepCompletion[] @relation("StepExecutedBy")
+  validatedSteps   AssetStepCompletion[] @relation("StepValidatedBy")
+  uploadedDocuments AssetDocument[]
+  levelTransitions LevelTransition[]
+  punchesCreated   Punch[] @relation("PunchCreatedBy")
+  punchesClosed    Punch[] @relation("PunchClosedBy")
+  certificatesCreated Certificate[]
+}
+
+enum AssetType {
+  XFM
+  MSB
+  UPS
+  ATS
+  ADP
+  PDU
+  CRAC
+  QDL
+}
+
+enum Level {
+  L1
+  L2
+  L3
+  L4
+  L5
+}
+
+model Asset {
+  id          String    @id @default(cuid())
+  tag         String    @unique
+  nome        String
+  tipo        AssetType
+  celula      Int
+  fonteA      String?
+  fonteB      String?
+  nivelAtual  Level     @default(L1)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  stepCompletions AssetStepCompletion[]
+  documents       AssetDocument[]
+  transitions     LevelTransition[]
+  punches         Punch[]
+}
+
+// Uma etapa do roadmap (lib/roadmap.ts) fica "executada" quando o Campo (ou
+// Aprovador) a marca, e só conta pro progresso/gate quando também
+// "validada" pela Qualidade (ou Aprovador) — ver SPEC-asset-commissioning.md.
+model AssetStepCompletion {
+  id            String    @id @default(cuid())
+  assetId       String
+  asset         Asset     @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  level         Level
+  stepId        String
+  executedAt    DateTime?
+  executedById  String?
+  executedBy    User?     @relation("StepExecutedBy", fields: [executedById], references: [id])
+  validatedAt   DateTime?
+  validatedById String?
+  validatedBy   User?     @relation("StepValidatedBy", fields: [validatedById], references: [id])
+
+  @@unique([assetId, level, stepId])
+}
+
+model AssetDocument {
+  id           String   @id @default(cuid())
+  assetId      String
+  asset        Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  level        Level
+  stepId       String
+  filename     String
+  storedPath   String
+  uploadedAt   DateTime @default(now())
+  uploadedById String
+  uploadedBy   User     @relation(fields: [uploadedById], references: [id])
+}
+
+// Rastreabilidade de avanço de nível: quem, quando, de onde pra onde.
+model LevelTransition {
+  id        String   @id @default(cuid())
+  assetId   String
+  asset     Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  fromLevel Level
+  toLevel   Level
+  at        DateTime @default(now())
+  byId      String
+  by        User     @relation(fields: [byId], references: [id])
+}
+
+enum PunchCategoria {
+  A
+  B
+  C
+}
+
+enum PunchStatus {
+  aberto
+  fechado
+}
+
+// A = crítico, trava entrada no L4 (lib/gate.ts). B/C não travam L4, mas
+// qualquer punch aberto — A, B ou C — trava a entrada no L5 (RFO), ver
+// SPEC-punch-list.md. `responsavel` é texto livre de propósito: muitas
+// vezes é uma disciplina/empresa externa, não um usuário do sistema.
+model Punch {
+  id             String         @id @default(cuid())
+  assetId        String
+  asset          Asset          @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  categoria      PunchCategoria
+  titulo         String
+  descricao      String
+  responsavel    String
+  prazo          DateTime?
+  status         PunchStatus    @default(aberto)
+  resolutionNote String?
+  createdAt      DateTime       @default(now())
+  createdById    String
+  createdBy      User           @relation("PunchCreatedBy", fields: [createdById], references: [id])
+  closedAt       DateTime?
+  closedById     String?
+  closedBy       User?          @relation("PunchClosedBy", fields: [closedById], references: [id])
+}
+
+// Registro append-only: uma recalibração vira um novo Certificate, nunca
+// uma edição do antigo — preserva o histórico. Status (válido/vencendo/
+// vencido) nunca é armazenado aqui, sempre calculado a partir de `validade`
+// via lib/certificates.ts — ver SPEC-certificates.md.
+model Certificate {
+  id                String   @id @default(cuid())
+  instrumento       String
+  numeroSerie       String
+  numeroCertificado String
+  laboratorio       String
+  dataCalibracao    DateTime
+  validade          DateTime
+  uso               String
+  createdAt         DateTime @default(now())
+  createdById       String
+  createdBy         User     @relation(fields: [createdById], references: [id])
+}

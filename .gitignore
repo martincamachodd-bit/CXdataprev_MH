@@ -1,0 +1,8 @@
+# agent-skills is its own git repo (skills marketplace clone, not part of
+# this project) — excluded so it isn't accidentally embedded as a broken
+# submodule reference. skills-lock.json (which pins its versions) stays tracked.
+/agent-skills/
+
+# Claude Code local/session-specific files
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
