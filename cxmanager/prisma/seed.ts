@@ -1,9 +1,25 @@
 import { PrismaClient, type AssetType, type Level } from "@prisma/client";
 import { hashPassword } from "../src/lib/hash";
+import { LEVELS_ORDER, applicableSteps } from "../src/lib/roadmap";
 
 const db = new PrismaClient();
 
 const SEED_PASSWORD = "TrocarSenha123!";
+
+function daysAgo(n: number): Date {
+  return new Date(Date.now() - n * 86_400_000);
+}
+
+// Quanto tempo atrás cada nível costuma ter sido concluído, só pra dar uma
+// história plausível aos ativos que já avançaram — não afeta o gate nem o
+// progresso, que continuam sendo calculados ao vivo a partir disso.
+const LEVEL_COMPLETED_DAYS_AGO: Record<Level, number> = {
+  L1: 46,
+  L2: 27,
+  L3: 11,
+  L4: 3,
+  L5: 0,
+};
 
 const SEED_USERS = [
   { nome: "Mário R.", email: "aprovador@dataprev.local", role: "aprovador" as const },
@@ -50,6 +66,47 @@ const SEED_PUNCHES: {
     titulo: "Disjuntor de saída Q13 sem curva de seletividade aprovada",
     descricao: "Estudo de seletividade divergente do projeto executivo.",
     responsavel: "Projetista",
+  },
+];
+
+// Instrumentos de calibração usados pelo time de campo/qualidade — um de
+// cada status (válido, vencendo, vencido) pra a tela /certificados não
+// nascer com os três KPIs zerados.
+const SEED_CERTIFICATES: {
+  instrumento: string;
+  numeroSerie: string;
+  numeroCertificado: string;
+  laboratorio: string;
+  dataCalibracaoDaysAgo: number;
+  validadeDaysFromNow: number;
+  uso: string;
+}[] = [
+  {
+    instrumento: "Megôhmetro Megabras MI-3201",
+    numeroSerie: "MI3201-0847",
+    numeroCertificado: "RBC 44.821",
+    laboratorio: "Instemaq",
+    dataCalibracaoDaysAgo: 185,
+    validadeDaysFromNow: 180,
+    uso: "Meggers L2 — todas as células",
+  },
+  {
+    instrumento: "Torquímetro TQ-88",
+    numeroSerie: "TQ88-1523",
+    numeroCertificado: "RBC 44.905",
+    laboratorio: "Instemaq",
+    dataCalibracaoDaysAgo: 350,
+    validadeDaysFromNow: 15,
+    uso: "Torque de conexões — barramentos e cabos",
+  },
+  {
+    instrumento: "Terrômetro MTD-20KWe",
+    numeroSerie: "MTD20-0392",
+    numeroCertificado: "RBC 44.760",
+    laboratorio: "Lab. Elétrica Sul",
+    dataCalibracaoDaysAgo: 400,
+    validadeDaysFromNow: -10,
+    uso: "Medição de resistência de aterramento",
   },
 ];
 
@@ -125,10 +182,98 @@ async function seedPunches() {
   }
 }
 
+// Completa (executa + valida) todas as etapas aplicáveis dos níveis
+// estritamente anteriores ao nível atual de cada ativo seed — sem isso o
+// ativo aparece com 100% do trabalho de níveis já passados marcado como
+// "pendente", o que não conta uma história plausível numa demonstração. O
+// nível atual em si fica intocado (é o que está "em andamento agora").
+async function seedStepCompletions() {
+  const [campo, qualidade] = await Promise.all([
+    db.user.findUnique({ where: { email: "campo@dataprev.local" } }),
+    db.user.findUnique({ where: { email: "qualidade@dataprev.local" } }),
+  ]);
+  if (!campo || !qualidade) {
+    console.log("Usuários campo/qualidade não encontrados — pulando seed de checklist.");
+    return;
+  }
+
+  for (const asset of SEED_ASSETS) {
+    const dbAsset = await db.asset.findUnique({ where: { tag: asset.tag } });
+    if (!dbAsset) continue;
+
+    const currentIdx = LEVELS_ORDER.indexOf(asset.nivelAtual);
+    const completedLevels = LEVELS_ORDER.slice(0, currentIdx);
+
+    for (const level of completedLevels) {
+      const steps = applicableSteps(level, asset.tipo);
+      const executedAt = daysAgo(LEVEL_COMPLETED_DAYS_AGO[level] + 1);
+      const validatedAt = daysAgo(LEVEL_COMPLETED_DAYS_AGO[level]);
+
+      for (const step of steps) {
+        await db.assetStepCompletion.upsert({
+          where: {
+            assetId_level_stepId: { assetId: dbAsset.id, level, stepId: step.id },
+          },
+          update: {},
+          create: {
+            assetId: dbAsset.id,
+            level,
+            stepId: step.id,
+            executedAt,
+            executedById: campo.id,
+            validatedAt,
+            validatedById: qualidade.id,
+          },
+        });
+      }
+      console.log(
+        `Checklist do ${level} concluído (histórico) pra ${asset.tag}: ${steps.length} etapa(s).`
+      );
+    }
+  }
+}
+
+async function seedCertificates() {
+  const qualidade = await db.user.findUnique({
+    where: { email: "qualidade@dataprev.local" },
+  });
+  if (!qualidade) {
+    console.log("Usuário qualidade não encontrado — pulando seed de certificados.");
+    return;
+  }
+
+  for (const cert of SEED_CERTIFICATES) {
+    const existing = await db.certificate.findFirst({
+      where: { numeroSerie: cert.numeroSerie },
+    });
+    if (existing) {
+      console.log(`Certificado seed já existe: ${cert.instrumento}`);
+      continue;
+    }
+
+    await db.certificate.create({
+      data: {
+        instrumento: cert.instrumento,
+        numeroSerie: cert.numeroSerie,
+        numeroCertificado: cert.numeroCertificado,
+        laboratorio: cert.laboratorio,
+        dataCalibracao: daysAgo(cert.dataCalibracaoDaysAgo),
+        // validadeDaysFromNow negativo = já vencido; daysAgo(-N) vira futuro.
+        validade: daysAgo(-cert.validadeDaysFromNow),
+        uso: cert.uso,
+        createdById: qualidade.id,
+      },
+    });
+    console.log(`Certificado seed criado: ${cert.instrumento}`);
+  }
+}
+
 async function main() {
   await seedUsers();
   await seedAssets();
   await seedPunches();
+  await seedStepCompletions();
+  await seedCertificates();
 }
 
 main()
